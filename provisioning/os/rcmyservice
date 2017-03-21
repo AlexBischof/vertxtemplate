@@ -1,0 +1,120 @@
+#!/bin/bash
+
+#############################################################
+# Variablendefinition
+#
+# Name der Applikation (nur fuer Logausgabe)
+APPNAME=MyService
+#
+HOME=/Application/MyService
+CONF=myservice.conf
+VIP=vip
+LOG=$HOME/log/myservice.log
+PORT=8084
+CMD_START="/usr/bin/java -Xmx1g -Xms1g -Duser.language=de -Duser.timezone=Europe/Berlin -jar ${HOME}/bin/fatty.jar -conf ${HOME}/conf/$CONF"
+############## HEALTH CHECK fehlt noch 
+CMD_HEALTH_CHECK="/usr/bin/curl --silent --write-out %{http_code} --output /dev/null -X GET https://$VIP:$PORT/health --cacert /etc/ssl/certs/dand-ca-bundle.crts.pem"
+RUNAS="user"
+#############################################################
+
+
+#############################################################
+# main
+
+# festestellen, als welcher user das Skript gestartet wurde und ggf. su-Befehl definieren
+USER=`eval whoami`
+if [ $USER == $RUNAS ]; then
+	SUBIT=""
+else
+	SUBIT="su - $RUNAS -c "
+fi
+
+# jeweilige Start-Option verarbeiten
+case "$1" in
+start)
+	echo -n "Starting $APNAME: "
+	echo $CMD_START
+	# pruefen, ob Applikation bereits laeuft, indem wir die Anzahl der PIDs einlesen (-c)
+	PID=`/usr/bin/pgrep -c -f "$CONF"`
+	if [  ! $PID -eq 0 ]; then
+		echo "$APPNAME ist already running ..."
+	# ansonsten starten
+	elif [ -z "$SUBIT" ]; then
+		# als der Benutzer, der wir sind
+        	eval $CMD_START 1>>$LOG 2>&1 &
+		echo "$APPNAME started ..."
+	else
+		# mit su (damit als richtiger Benutzer gestartet wird)
+		echo "$SUBIT $CMD_START "
+       		$SUBIT "$CMD_START 1>>$LOG 2>&1 &"
+		echo "$APPNAME started ..."
+	fi
+	;;
+stop)
+	# Anzahl der PIDs der Applikation einlesen
+	PID=`/usr/bin/pgrep -c -f "$CONF"`
+	if [ ! $PID -eq 0 ]; then
+		# aelteste PID der Applikation einlesen (wenn mit su gestartet wird, existieren
+		# zwei Prozesse und wir killen den parent-Prozess
+		PID=`/usr/bin/pgrep -o -f "$CONF"`
+    		echo -n "Stopping $APPNAME: "
+		kill $PID
+		sleep 2
+		# pruefen, ob erfolgreich gestoppt
+		PID2=`/bin/ps h -o pid -p $PID `
+		if [ -z $PID2 ]; then
+			echo "$APPNAME stopped ..."
+		else	
+			echo -n "Stopping failed , kill -9 $PID ..."
+			kill -9 $PID
+			echo "$APPNAME killed ..."
+		fi
+	else
+		echo "$APPNAME is not running ..."
+	fi
+	;;
+status)
+	rc=`$CMD_HEALTH_CHECK`
+	PID=`/usr/bin/pgrep -c -f "$CONF"`
+	if [  $PID -eq 0 ]; then
+		echo "$APPNAME is not running ..."
+	else
+		echo "$APPNAME is running ..."
+		if [ "$rc" != "200" ]; then
+			echo "but health check for $APPNAME failed ..."
+		fi
+	fi
+	;;
+
+check)
+	rc=`$CMD_HEALTH_CHECK`
+	PID=`/usr/bin/pgrep -c -f "$CONF"`
+	if [  $PID -eq 0 ]; then
+		echo "$APPNAME ist not running ..."
+	else
+		echo "$APPNAME ist running ..."
+		if [ "$rc" != "200" ]; then
+			echo "health check for $APPNAME failed ..."
+			$0 restart
+		fi
+	fi
+	;;
+
+restart)
+	echo "restarting $APPNAME"
+	$0 stop
+	sleep 1
+	$0 start
+	;;
+help)
+	echo
+	echo "$0 start    startet die Applikation"
+	echo "$0 stop     stoppt die Applikation, falls nicht gestoppt werden kann, wird ein kill -9 durchgefuehrt"
+	echo "$0 restart  stoppt die Applikation, wartet 1 Sekunde und startet sie dann wieder"
+	echo "$0 status   gibt den Status der Applikation zurueck (gestartet/nicht gestartet)"
+	echo "$0 check    prueft den Status der Applikation und startet bei fehlgeschlagenem health-check die Applikation neu"
+	echo
+	;;
+*)
+	echo "usage: $0 (start|stop|restart|check|help)"
+esac
